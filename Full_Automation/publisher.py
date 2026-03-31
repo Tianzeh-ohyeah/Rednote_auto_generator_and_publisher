@@ -135,9 +135,25 @@ class XiaoHongShuPublisher:
             # [修改点：第一次填入正文，不把标签写进这里]
             await page.locator(".tiptap").fill(self.body)
 
+            logger.info("[-] 点击一键排版，生成 AI 封面...")
             await page.get_by_role("button", name="一键排版").click()
-            await asyncio.sleep(5) 
-            await page.locator(".template-cover-container img").first.click()
+            try:
+                # 等待封面模板容器出现
+                cover_container = page.locator(".template-cover-container")
+                await cover_container.first.wait_for(state="visible", timeout=15000)
+                
+                # 你抓取的代码里 2, 5, 7 都可以。
+                # nth(1) 代表第 2 个，nth(4) 代表第 5 个，nth(6) 代表第 7 个。
+                # 这里我们选第 2 个，因为它最稳。
+                logger.info("[-] 正在选择第 2 个生成的 AI 封面...")
+                await cover_container.nth(1).locator("img").first.click()
+                
+                # 稍微停半秒，确保选中态切换
+                await asyncio.sleep(0.5) 
+            except Exception as e:
+                logger.warning(f"[-] 自动选择封面失败，将使用默认首选: {e}")
+                # 如果自动选失败了，兜底点击第一个
+                await page.locator(".template-cover-container img").first.click()
             await page.get_by_role("button", name="下一步").click()
 
             # ================= 第二阶段：正式发布页 =================
