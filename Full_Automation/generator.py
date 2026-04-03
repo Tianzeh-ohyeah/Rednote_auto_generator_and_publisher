@@ -136,21 +136,26 @@ def get_intelligent_model_pool():
             m_name = m.name.lower()
             if "gemini" in m_name and not any(x in m_name for x in black_list):
                 if any(v in m_name for v in ["flash", "pro"]):
-                    full_name = m.name if m.name.startswith("models/") else f"models/{m.name}"
-                    pool.append(full_name)
+                    # 【核心修复】：新版 SDK 直接使用模型名，去除可能存在的 models/ 前缀
+                    clean_name = m.name.replace("models/", "")
+                    pool.append(clean_name)
         
         def model_priority(name):
             n = name.lower()
             if "3-flash" in n: return 10
+            if "2.5-flash" in n: return 9
             if "2.0-flash" in n: return 8
             if "1.5-pro" in n: return 6
             if "1.5-flash" in n: return 4
             return 0
             
         pool.sort(key=model_priority, reverse=True)
-        return pool[:3] if pool else ["models/gemini-1.5-flash"]
-    except:
-        return ["models/gemini-1.5-flash"]
+        # 【核心修复】：兜底列表也必须去掉 models/ 前缀
+        return pool[:3] if pool else ["gemini-1.5-flash"]
+    except Exception as e:
+        logger.error(f"探测模型池失败，使用默认模型: {e}")
+        # 【核心修复】：兜底列表也必须去掉 models/ 前缀
+        return ["gemini-1.5-flash"]
 
 def safe_generate_with_fallback(prompt):
     model_pool = get_intelligent_model_pool()
@@ -162,11 +167,14 @@ def safe_generate_with_fallback(prompt):
             if res and res.text:
                 return res.text, model_name
         except Exception as e:
+            # 👇 新增这一行，让系统暴露出真正的死因 👇
+            logger.error(f"调用节点 {model_name} 时发生异常: {str(e)}") 
+            
             if "429" in str(e): time.sleep(1.5)
             continue 
     return None, None
 
-def load_prompt_template(file_name="daily_novel_template.txt"):
+def load_prompt_template(file_name="xiaoshuo.txt"):
     template_path = os.path.join(BASE_DIR, file_name)
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"找不到 Prompt 模板文件: {template_path}")
@@ -183,22 +191,14 @@ def get_previous_context(file_path):
 # [MODIFIED] 传入热点参数 trending_context
 def generate_healing_content(previous_context, trending_context):
     random_seed = f"{datetime.now().strftime('%Y%m%d%H%M')}_{random.randint(1000, 9999)}"
-    
-    # [NEW] 核心指令：要求科普，禁止负面吐槽
-    intel_guidance = """
-    指令增强：
-    1. 必须聚焦于“即将发生”或“最近发生”的事件。
-    2. 严禁写成“避雷贴”，请将分析转化为“参与攻略”或“技术科普”。
-    3. 如果提到明星或电影，请科普其背后的专业知识（如：IMAX规格、舞台工程、票务分发逻辑）。
-    4. 确保数据真实（如：北京各大影院的均价、展会的人均消费）。
-    """
 
     try:
         template = load_prompt_template("xiaoshuo.txt")
         # 注入逻辑
         prompt = template.replace("{random_seed}", random_seed)\
                          .replace("{previous_context}", previous_context)\
-                         .replace("{trending_context}", trending_context + "\n" + intel_guidance)
+                         .replace("{trending_context}", trending_context)
+        
     except Exception as e:
         logger.error(f"加载模板失败: {e}")
         prompt = f"请针对以下热点写一篇硬核科普帖，要求事实准确，禁止避雷：{trending_context}，今日话题不可以和昨天的一样：{previous_context}"
@@ -206,16 +206,12 @@ def generate_healing_content(previous_context, trending_context):
     logger.info("引擎正在分析事实并构建科普逻辑...")
     content, used_model = safe_generate_with_fallback(prompt)
 
-    if content:
-        # 【格式保险】：严格清理 AI 可能加上的 Markdown 符号，确保下游脚本不报错
-        content = content.replace("**标题：**", "标题：").replace("**正文：**", "正文：").replace("**标签：**", "标签：")
-        content = content.replace("### 标题", "标题：").replace("### 正文", "正文：").replace("### 标签", "标签：")
-        content = content.replace("**", "") # 清理正文里偶发的加粗 
-        
-    if "标题：" in content and "正文：" in content and "标签：" in content:  
+    if content and "标题：" in content and "正文：" in content and "标签：" in content:  
         logger.success(f"算力节点 [{used_model}] 推演成功")
         return content.strip()
     else:
+        # 把 content 打印出来，看看 AI 到底回复了什么格式（可能是格式不对，或者干脆是 None）
+        logger.error(f"生成的内容不符合格式，或调用完全失败。当前 content 值为: {content}")
         raise Exception("所有算力节点均已耗尽或未响应")
 
 # --- 3. 执行入口 ---
