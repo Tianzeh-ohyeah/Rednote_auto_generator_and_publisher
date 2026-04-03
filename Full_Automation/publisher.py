@@ -1,71 +1,99 @@
 # -*- coding: utf-8 -*-
+import random
+from datetime import datetime, timedelta
 import asyncio
 import os
 import re
 import json
 from pathlib import Path
-from datetime import datetime
 from playwright.async_api import Playwright, async_playwright, expect
 
+# ==============================================================================
+# ⚙️ 基础配置
+# ==============================================================================
 class Config:
     BASE_DIR = Path(__file__).resolve().parent
     CONTENT_FILE = BASE_DIR / "Today_File" / "content.txt"
     COOKIE_PATH = r"C:\Users\tianzeh\Desktop\Full_Automation\cookies\account.json"
     ERROR_SCREENSHOT = BASE_DIR / "debug_error.png"
 
+# ==============================================================================
+# 🖨️ 终端日志类 (带颜色与明确标识)
+# ==============================================================================
 class MockLogger:
     def __init__(self, name): self.name = name
-    def info(self, msg): print(f"[{self.name} INFO] {datetime.now().strftime('%H:%M:%S')} {msg}")
-    def success(self, msg): print(f"[{self.name} SUCCESS] {datetime.now().strftime('%H:%M:%S')} {msg}")
-    def error(self, msg): print(f"[{self.name} ERROR] {datetime.now().strftime('%H:%M:%S')} {msg}")
-    def warning(self, msg): print(f"[{self.name} WARNING] {datetime.now().strftime('%H:%M:%S')} {msg}") # 补上这一行
+    def info(self, msg): print(f"ℹ️ [{self.name} INFO] {datetime.now().strftime('%H:%M:%S')} | {msg}")
+    def success(self, msg): print(f"✅ [{self.name} SUCCESS] {datetime.now().strftime('%H:%M:%S')} | {msg}")
+    def error(self, msg): print(f"❌ [{self.name} ERROR] {datetime.now().strftime('%H:%M:%S')} | {msg}")
+    def warning(self, msg): print(f"⚠️ [{self.name} WARNING] {datetime.now().strftime('%H:%M:%S')} | {msg}")
 
 logger = MockLogger("XHS_Uploader")
 
 # ==============================================================================
-# 🛠️ 核心函数
+# 🤖 仿生人类行为辅助函数
 # ==============================================================================
+async def random_sleep(min_s=0.5, max_s=1.5):
+    """模拟人类发呆、阅读、犹豫的时间"""
+    delay = random.uniform(min_s, max_s)
+    await asyncio.sleep(delay)
 
+async def simulate_mouse_move(page):
+    """模拟人类无聊时在页面上滑动鼠标，带轨迹(steps)"""
+    v = page.viewport_size
+    x = random.randint(100, v['width'] - 100)
+    y = random.randint(100, v['height'] - 100)
+    # steps 参数让鼠标移动变成滑动，而不是瞬间转移
+    await page.mouse.move(x, y, steps=random.randint(20, 50))
+    await random_sleep(0.2, 0.4)
+
+async def click_safe_blank(page):
+    """
+    【修正版】点击页面最右侧的背景留白区。
+    """
+    v = page.viewport_size
+    # 选取屏幕最右侧 2% 到 5% 的窄长区域
+    safe_x = random.randint(int(v['width'] * 0.95), int(v['width'] * 0.98))
+    # 避开顶部可能存在的个人信息区，点中间高度
+    safe_y = random.randint(int(v['height'] * 0.3), int(v['height'] * 0.7))
+    
+    await page.mouse.click(safe_x, safe_y)
+    logger.info(f"点击右侧背景安全区: 坐标({safe_x}, {safe_y})")
+    await random_sleep(0.5, 1.0)
+
+# ==============================================================================
+# 🛠️ 核心函数: 初始化与内容解析
+# ==============================================================================
 async def set_init_script(context):
+    """抹除 Playwright 的 webdriver 特征，防爬虫检测"""
     await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
     return context
 
 def parse_local_content():
+    """解析本地 txt 内容"""
     if not Config.CONTENT_FILE.exists():
         logger.error(f"找不到内容文件: {Config.CONTENT_FILE}")
         return None
         
     raw_text = Config.CONTENT_FILE.read_text(encoding='utf-8').strip()
     try:
-        # 1. 提取标题
         title_match = re.search(r"标题：\s*(.*?)(?:\n|$)", raw_text)
         title = title_match.group(1).strip() if title_match else "无标题"
         
-        # 2. 提取标签 (取最后一行包含“标签：”的内容)
         tags_match = re.search(r"标签：\s*(.*)$", raw_text, re.MULTILINE)
         tags = tags_match.group(1).strip() if tags_match else ""
         
-        # 3. 提取正文 [核心修改点]
-        # 找到“正文：”字符串结束后的起始位置
-        # 不要硬编码 +3，用 len() 更安全，并配合 strip() 自动干掉前后的换行/空格
         marker_start = "正文："
         marker_end = "标签："
         
         if marker_start in raw_text and marker_end in raw_text:
             start_idx = raw_text.find(marker_start) + len(marker_start)
             end_idx = raw_text.find(marker_end)
-            # 这里的切片会保留 start_idx 到 end_idx 之间的所有原始字符（包括 emoji）
             body = raw_text[start_idx:end_idx].strip()
         else:
             logger.error("文中缺少‘正文：’或‘标签：’标记")
             return None
         
-        # 打印调试，确认解析出的 body 结尾是否有 emoji
-        print(f"--- 解析结果预览 ---")
-        print(f"标题: {title}")
-        print(f"正文末尾字符: {body[-10:]}") # 这里你可以看到 emoji 还在不在
-        print(f"------------------")
-        
+        logger.info(f"成功解析文案，标题: {title[:10]}...")
         return {"title": title, "body": body, "tags": tags}
     
     except Exception as e:
@@ -73,7 +101,7 @@ def parse_local_content():
         return None
 
 # ==============================================================================
-# 📝 发布类 (手动注入 Cookie 核心)
+# 📝 发布类 (核心流程)
 # ==============================================================================
 class XiaoHongShuPublisher:
     def __init__(self, data: dict, location: str = "中国戏曲学院"):
@@ -82,22 +110,22 @@ class XiaoHongShuPublisher:
         self.tags_raw = data['tags']
         self.location = location
         
-        # [修改点：严格生成英文冒号时间格式]
-        from datetime import datetime, timedelta
+        # 定时发布时间计算：当天下午6点 + 随机分钟/秒
         today_6pm = datetime.now().replace(hour=18, minute=0, second=0, microsecond=0)
-        if datetime.now() >= today_6pm:
-            today_6pm += timedelta(days=1)
-        self.publish_time = today_6pm.strftime("%Y-%m-%d %H:%M")
-    
-    async def _clear_popups(self, page):
-        selectors = ["img[alt='Close']", "text=我知道了", "text=关闭", "div[role='dialog'] button[aria-label='Close']"]
-        for sel in selectors:
-            try:
-                if await page.locator(sel).first.is_visible(timeout=500):
-                    await page.locator(sel).first.click()
-            except: continue
+        random_minutes = random.randint(0, 59)
+        random_seconds = random.randint(0, 59)
+        
+        publish_time = today_6pm + timedelta(minutes=random_minutes, seconds=random_seconds)
+
+        # 如果当前时间已经过了计算出的时间，顺延到明天
+        if datetime.now() >= publish_time:
+            publish_time += timedelta(days=1)
+            
+        self.publish_time = publish_time.strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"生成随机定时发布时间: {self.publish_time}")
 
     async def upload(self, playwright: Playwright):
+        # 1. 加载 Cookie 并启动浏览器
         with open(Config.COOKIE_PATH, 'r', encoding='utf-8') as f:
             cookie_data = json.load(f)
         
@@ -109,205 +137,221 @@ class XiaoHongShuPublisher:
         page.set_default_timeout(60000)
 
         try:
-            logger.info(f"[-] 开始发布: {self.title}")
+            logger.info("开始访问小红书创作者中心...")
             await page.goto("https://creator.xiaohongshu.com/publish/publish")
 
+            # 初始仿生缓冲
+            await simulate_mouse_move(page)
+            await click_safe_blank(page)
+
+            # 打开下拉菜单
             await page.locator(".dropdownBtn").click()
-            await asyncio.sleep(1)
+            await random_sleep(0.8, 1.5)
+
+            # 点击写长文
             try:
-                # [修改点：完全同步 codegen 路径，利用正则精确定位“写长文”]
                 await page.locator("div").filter(has_text=re.compile(r"^写长文$")).nth(1).click(timeout=5000)
             except:
-                logger.error("无法定位‘写长文’按钮，尝试备用坐标点击...")
+                logger.warning("首选定位‘写长文’失败，使用备用方案...")
                 await page.get_by_text("写长文").click()
             
-            logger.info("[-] 等待进入创作界面...")
+            # 【优化点1：页面跳转等待】确保长文弹窗/页面真正加载完毕再继续
+            logger.info("等待进入‘写长文’创作界面...")
+            await page.wait_for_load_state("domcontentloaded")
+            await random_sleep(1.0, 2.0)
             
             try:
                 new_work_btn = page.get_by_role("button", name="新的创作")
                 await new_work_btn.wait_for(state="visible", timeout=10000)
+                await simulate_mouse_move(page) 
                 await new_work_btn.click()
             except Exception as e:
-                logger.error("未能找到“新的创作”按钮，尝试直接填入内容...")
+                logger.warning("未检测到‘新的创作’按钮，可能已直接处于编辑状态")
 
             # ================= 第一阶段：编辑器排版 =================
+            logger.info("进入第一阶段编辑器，准备填入初步正文...")
+            await random_sleep(1.0, 2.0) 
             await page.get_by_role("textbox", name="输入标题").fill(self.title)
-            # [修改点：第一次填入正文，不把标签写进这里]
+            await random_sleep(0.5, 1.2) 
+            
             await page.locator(".tiptap").fill(self.body)
+            await random_sleep(1.5, 3.0) # 假装检查错别字
 
-            logger.info("[-] 点击一键排版，生成 AI 封面...")
+            logger.info("点击一键排版，生成 AI 封面...")
+            await simulate_mouse_move(page)
             await page.get_by_role("button", name="一键排版").click()
+            
             try:
-                # 等待封面模板容器出现
                 cover_container = page.locator(".template-cover-container")
                 await cover_container.first.wait_for(state="visible", timeout=15000)
                 
-                # 你抓取的代码里 2, 5, 7 都可以。
-                # nth(1) 代表第 2 个，nth(4) 代表第 5 个，nth(6) 代表第 7 个。
-                # 这里我们选第 2 个，因为它最稳。
-                logger.info("[-] 正在选择第 2 个生成的 AI 封面...")
+                await random_sleep(2.0, 4.0) # 假装挑选封面
+                logger.info("正在选择第 2 个生成的 AI 封面...")
                 await cover_container.nth(1).locator("img").first.click()
-                
-                # 稍微停半秒，确保选中态切换
                 await asyncio.sleep(0.5) 
             except Exception as e:
-                logger.warning(f"[-] 自动选择封面失败，将使用默认首选: {e}")
-                # 如果自动选失败了，兜底点击第一个
+                logger.warning("自动选择特定封面失败，将兜底点击第一个")
                 await page.locator(".template-cover-container img").first.click()
+
+            await random_sleep(50.0, 60.0) # 重点缓冲，防狂点检测
+                
             await page.get_by_role("button", name="下一步").click()
 
-            # ================= 第二阶段：正式发布页 =================
-            logger.info("[-] 进入发布详情页，准备录入正文和标签...")
+            # 【优化点1：页面跳转等待】点击下一步后，跳转到正式发布页需要时间
+            logger.info("等待跳转到最终发布详情页...")
+            # 等待网络空闲或等待目标页面的标志性元素出现
+            await page.wait_for_load_state("domcontentloaded")
+            await random_sleep(10.0, 15.0) # 重点缓冲，防狂点检测
+            await click_safe_blank(page)
 
+            # ================= 第二阶段：正式发布页 =================
+            logger.info("开始第二阶段：最终正文与标签填充...")
+            
+            # 激活编辑区
             desc_area = page.get_by_role("paragraph")
             try:
                 await desc_area.first.wait_for(state="visible", timeout=10000)
-                # 复刻录制器的操作：双击或点击两次以确保激活
                 await desc_area.first.click()
                 await asyncio.sleep(0.5)
                 await desc_area.first.click()
-                logger.info("[-] 已通过点击段落元素激活编辑区")
             except Exception as e:
-                logger.warning(f"[-] 未能通过 paragraph 激活，尝试直接定位 textbox: {e}")
+                logger.warning("双击 paragraph 激活失败，尝试直接定位 textbox")
 
-            # 1. 重新精确定位描述框
-            # 小红书发布页通常有两个 textbox，第一个是标题（继承来的），第二个是正文
             final_desc_box = page.get_by_role("textbox").nth(1)
 
+            # 清空并重新填入最终正文
             await final_desc_box.click()
             await page.keyboard.press("Control+A")
             await page.keyboard.press("Backspace")
-            
-            # 录制器里直接 fill 成功了，我们也用 fill
             await final_desc_box.fill(self.body)
-            await asyncio.sleep(1.5) 
-            logger.info("[-] 正文已填入，等待 Emoji 节点渲染稳定...")
-            logger.success("[-] 第二次正文填充成功！")
+            
+            await random_sleep(2.0, 3.0) 
+            logger.success("第二次正文填充成功，等待渲染...")
 
-            # --- 关键修复 2：连环击确保光标在绝对末尾 ---
-            # 有时候 Control+End 会停在 Emoji 前面，补两次 ArrowRight 强制向后移
-            await final_desc_box.click() # 重新获取焦点
+            # 移动光标到末尾
+            await final_desc_box.click() 
             await page.keyboard.press("Control+End")
+            
+            # 防止光标卡在 Emoji 前，补几下右方向键（带停顿模拟手敲）
             for _ in range(3):
                 await page.keyboard.press("ArrowRight")
+                await random_sleep(0.1, 0.3) 
 
-            # 4. 移动光标到末尾，准备打标签
-            await page.keyboard.press("Control+End")
+            # 【优化点2：修复连续空行敲击被检测】
+            # 不要连续无间隔地发送 Enter。用明显的延迟模拟人类换行行为
+            logger.info("准备插入标签区换行...")
             await page.keyboard.press("Enter")
-            await page.keyboard.press("Enter")
-            logger.success("[-] 光标已锁定在正文最下方")
+            await random_sleep(0.6, 1.2) # 停顿至少半秒以上
+            await page.keyboard.press("Enter") # 如果必须留空行，这样间隔敲击才是安全的
+            await random_sleep(0.5, 1.0)
+            logger.info("光标已安全移至新行")
 
-            # 5. 逐个打标签，这里改用 page.keyboard.type，比 locator.press_sequentially 更底层
-            # [修改点：精准打标签逻辑 - 彻底锁定正文末尾]
+            # 提取并逐个输入标签
             tags = re.findall(r'#([^\s#]+)', self.tags_raw)
-
-            # 强制将光标移到文本末尾，并确保与正文空开一行
-            await final_desc_box.click()
-            await page.keyboard.press("Control+End") 
-            await page.keyboard.press("Enter")
-
             for t in tags:
-                logger.info(f"[-] 正在模糊匹配标签: #{t}")
-                
-                # 1. 输入 # 和标签名
+                logger.info(f"正在输入标签: #{t}")
                 await final_desc_box.type(f"#{t}")
-                # 稍微等一下让后端查询列表浮出
-                await asyncio.sleep(1.0)
+                await random_sleep(0.8, 1.5) # 等待后端弹出联想列表
                 
-                # 2. 核心优化：模糊匹配
-                # 不再匹配精确文字，而是匹配标签列表里的第一个容器(通常第一个就是最相关的)
-                # 使用 CSS 选择器定位标签列表项的第一个元素
                 first_suggestion = page.locator(".tag-item").first
-                
                 try:
-                    # 等待下拉列表容器出现
-                    await first_suggestion.wait_for(state="visible", timeout=10000)
-                    # 点击第一个匹配项，通常小红书会把最相似的放第一个
+                    await first_suggestion.wait_for(state="visible", timeout=8000)
+                    await simulate_mouse_move(page) 
                     await first_suggestion.click()
-                    logger.success(f"  [+] 成功通过模糊匹配绑定: #{t}")
+                    logger.success(f"成功绑定下拉推荐标签: #{t}")
                 except:
-                    # 如果连下拉列表都没出来，说明该词太冷门，直接按空格跳过
-                    logger.warning(f"  [!] 未找到 #{t} 的相关联标签，执行默认空格跳过")
+                    logger.warning(f"未找到联想标签，使用普通文本: #{t}")
                     await page.keyboard.press("Space")
                 
-                # 3. 每个标签后紧跟一个空格，保证视觉独立
+                # 标签与标签之间的打字思考间隔
                 await page.keyboard.press("Space")
-                await asyncio.sleep(0.5)
+                await random_sleep(0.4, 0.9) 
 
-            # 6. 检查一下：如果最后还是没变色，补一记“Enter”
             await page.keyboard.press("Enter")
 
-            # [修改点：完美同步 codegen 的添加地点逻辑]
+            # 添加地点
             try:
-                logger.info("[-] 开始添加地点...")
+                logger.info(f"正在搜索地点: {self.location}")
+                await simulate_mouse_move(page)
                 await page.get_by_text("添加地点").click(timeout=3000)
                 location_input = page.get_by_role("textbox").nth(2)
-                await location_input.fill(self.location)
-                await asyncio.sleep(1.5) 
+                
+                # 模拟缓慢输入
+                await location_input.press_sequentially(self.location, delay=random.randint(60, 150))
+                await random_sleep(1.0, 2.0) # 等待接口返回列表
+                
                 await page.locator("div").filter(has_text=re.compile(f"^{self.location}$")).first.click()
+                logger.success("地点添加成功")
             except Exception as e:
-                logger.error(f"地点添加异常: {e}")
+                logger.error("地点添加未成功跳过，继续执行")
 
-            # 【修复 3：定时发布时间格式与注入问题】
+            # 设置定时发布
+            logger.info("正在配置定时发布...")
             timer_container = page.locator(".post-time-switch-container")
             await timer_container.scroll_into_view_if_needed()
+            await random_sleep(0.5, 1.5) 
             
-            # 点击开启定时发布开关
             switch = timer_container.locator(".d-switch-simulator")
             is_on = await switch.evaluate("el => el.parentElement.classList.contains('checked')")
             if not is_on:
                 await switch.click()
-                await asyncio.sleep(1)
+                await random_sleep(0.8, 1.2)
             
-            # 基于 codegen 定位输入框
             time_input_container = page.locator("div").filter(has_text=re.compile(r"^定时发布"))
             time_input = time_input_container.get_by_role("textbox").first
             
             await time_input.wait_for(state="visible")
             await time_input.click()
+            await random_sleep(0.2, 0.5)
             
-            # ======== 核心修复：先填入，后删除，全程保持非空 ========
-            
-            # 1. 强制将光标移动到输入框最开头
             await page.keyboard.press("Home")
-            
-            # 2. 慢慢填入新时间。
-            # 假设旧时间是 "2026-03-16 18:40"，填完后会变成 "2026-03-16 21:002026-03-16 18:40"
-            await time_input.press_sequentially(self.publish_time, delay=50)
+            await time_input.press_sequentially(self.publish_time, delay=random.randint(40, 100))
             await asyncio.sleep(0.5)
             
-            # 3. 此时光标正好夹在新时间和旧时间的中间。
-            # 直接按 Delete 键向右侧删除旧时间。时间格式固定是 16 个字符，保险起见我们循环按 20 次。
             for _ in range(20):
                 await page.keyboard.press("Delete")
             
-            # 模拟点击页面空白处（你的 codegen 里的 .publish-page click），让日历控件完全收起，保存数值
-            await page.locator(".publish-page").click(position={"x": 0, "y": 0})
-            await asyncio.sleep(1)
+            # 点击边缘收起时间控件
+            await click_safe_blank(page)
+            await random_sleep(1.0, 2.0)
 
-            # 6. 最后确认按钮并点击
+            # 最终发布
+            logger.info("准备最终提交...")
             pub_btn = page.get_by_role("button", name="定时发布")
             await expect(pub_btn).to_have_text(re.compile("定时发布"), timeout=10000)
+            
+            await simulate_mouse_move(page) 
+            logger.info("深呼吸，点击发布！")
+            await random_sleep(1.0, 2.0) # 最后的犹豫时间
             await pub_btn.click()
             
-            # 确认发布成功跳转
-            await page.get_by_role("button", name="立即返回").wait_for(state="visible", timeout=10000)
-            logger.success("🚀 恭喜，定时发布任务已成功提交！")
+            # 等待成功标识出现
+            await page.get_by_role("button", name="立即返回").wait_for(state="visible", timeout=15000)
+            logger.success("🎉 定时发布任务已成功提交！")
 
         except Exception as e:
-            logger.error(f"流程异常: {e}")
+            logger.error(f"发生异常中断: {e}")
             await page.screenshot(path=str(Config.ERROR_SCREENSHOT))
+            logger.warning(f"已保存错误截图至: {Config.ERROR_SCREENSHOT}")
         finally:
             await browser.close()
+            logger.info("浏览器已关闭，任务结束。")
 
+# ==============================================================================
+# 🚀 启动入口
+# ==============================================================================
 async def main():
+    print("\n" + "="*50)
+    print("🚀 小红书自动化发布脚本启动")
+    print("="*50 + "\n")
+
     if not os.path.exists(Config.COOKIE_PATH):
-        logger.error("❌ 找不到 Cookie 文件，请检查路径")
+        logger.error("找不到 Cookie 文件，请检查路径是否正确。")
         return
 
     content_data = parse_local_content()
     if not content_data: 
-        logger.error("❌ 内容解析为空，请检查 content.txt 格式")
+        logger.error("内容提取失败，中止流程。")
         return
     
     async with async_playwright() as playwright:
